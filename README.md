@@ -19,4 +19,3 @@ This project implements a client-server architecture where an operator client se
 - **Framework:** FastAPI
 - **Communication:** HTTP REST
 
-## Project Structure
