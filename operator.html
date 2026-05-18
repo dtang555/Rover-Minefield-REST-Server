@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ground Control</title>
+<style>
+  body { font-family: monospace; padding: 20px; max-width: 900px; margin: 0 auto; }
+  h2 { margin-top: 30px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  input, textarea, button { font-family: monospace; font-size: 14px; padding: 4px 8px; margin: 2px; }
+  button { cursor: pointer; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  td, th { border: 1px solid #ccc; padding: 6px 10px; text-align: left; font-size: 13px; }
+  th { background: #f0f0f0; }
+  #map-wrap td { width: 36px; height: 36px; text-align: center; cursor: pointer; }
+  .mine-cell { background: #ffcccc; }
+  .path-cell { background: #ccffcc; }
+  #log { background: #f8f8f8; border: 1px solid #ccc; padding: 10px; height: 120px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; }
+  #path-out { font-size: 12px; white-space: pre; background: #f8f8f8; border: 1px solid #ccc; padding: 10px; display: none; }
+</style>
+</head>
+<body>
+
+<h1>Ground Control</h1>
+<label>Server: <input id="url" value="https://coe892lab42022g501177505-f8ftb9ccf5hpgdax.canadacentral-01.azurewebsites.net" size="30"></label>
+<button onclick="syncAll()">Sync</button>
+
+<h2>Map</h2>
+<div id="map-wrap"></div>
+
+<h2>Mines</h2>
+<table>
+  <tr><th>ID</th><th>Row</th><th>Col</th><th>Serial</th><th></th></tr>
+  <tbody id="mine-tbody"></tbody>
+</table>
+<br>
+<b>Add mine:</b>
+Row <input id="m-row" type="number" size="4">
+Col <input id="m-col" type="number" size="4">
+Serial <input id="m-serial" size="8">
+<button onclick="addMine()">Add</button>
+
+<h2>Rovers</h2>
+<table>
+  <tr><th>ID</th><th>Status</th><th></th></tr>
+  <tbody id="rover-tbody"></tbody>
+</table>
+<br>
+<b>Create rover:</b>
+Commands <input id="r-cmds" size="30" placeholder="e.g. MMRMDMM">
+<button onclick="createRover()">Create</button>
+
+<h2>Dispatch</h2>
+Rover ID <input id="d-id" type="number" size="6">
+<button onclick="dispatch()">Dispatch</button>
+<pre id="path-out"></pre>
+
+<h2>Log</h2>
+<div id="log"></div>
+
+<script>
+  const url = () => document.getElementById('url').value.replace(/\/$/, '');
+
+  function log(msg) {
+    const el = document.getElementById('log');
+    el.textContent += new Date().toLocaleTimeString() + ' ' + msg + '\n';
+    el.scrollTop = el.scrollHeight;
+  }
+
+  async function api(method, path, body) {
+    const res = await fetch(url() + path, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.detail || res.statusText);
+    return data;
+  }
+
+  let minesData = [];
+  let pathOverlay = null;
+
+  async function syncAll() {
+    try {
+      const map = await api('GET', '/map');
+      renderMap(map);
+      log('Map loaded');
+    } catch(e) { log('Map error: ' + e.message); }
+
+    try {
+      minesData = await api('GET', '/mines');
+      renderMines();
+      log(minesData.length + ' mines loaded');
+    } catch(e) { log('Mines error: ' + e.message); }
+
+    try {
+      const rovers = await api('GET', '/rovers');
+      renderRovers(rovers);
+      log(rovers.length + ' rovers loaded');
+    } catch(e) { log('Rovers error: ' + e.message); }
+  }
+
+  function renderMap(map) {
+    const mineSet = {};
+    minesData.forEach(m => mineSet[m.row + ',' + m.col] = true);
+
+    let html = '<table><tbody>';
+    for (let r = 0; r < map.rows; r++) {
+      html += '<tr>';
+      for (let c = 0; c < map.cols; c++) {
+        const key = r + ',' + c;
+        let cls = '';
+        if (mineSet[key]) cls = 'mine-cell';
+        else if (pathOverlay && pathOverlay[r] && pathOverlay[r][c]) cls = 'path-cell';
+        const label = mineSet[key] ? '💣' : (pathOverlay && pathOverlay[r] && pathOverlay[r][c] ? '*' : '·');
+        html += `<td class="${cls}" onclick="selectCell(${r},${c})" title="(${r},${c})">${label}</td>`;
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    document.getElementById('map-wrap').innerHTML = html;
+  }
+
+  function selectCell(r, c) {
+    document.getElementById('m-row').value = r;
+    document.getElementById('m-col').value = c;
+    log('Selected cell (' + r + ',' + c + ')');
+  }
+
+  function renderMines() {
+    const tb = document.getElementById('mine-tbody');
+    tb.innerHTML = minesData.map(m =>
+      `<tr><td>${m.id}</td><td>${m.row}</td><td>${m.col}</td><td>${m.serial}</td>
+       <td><button onclick="deleteMine(${m.id})">Delete</button></td></tr>`
+    ).join('');
+  }
+
+  function renderRovers(rovers) {
+    const tb = document.getElementById('rover-tbody');
+    tb.innerHTML = rovers.map(r =>
+      `<tr><td>${r.id}</td><td>${r.status}</td>
+       <td><button onclick="quickDispatch(${r.id})">Dispatch</button>
+           <button onclick="deleteRover(${r.id})">Delete</button></td></tr>`
+    ).join('');
+  }
+
+  async function addMine() {
+    const row = parseInt(document.getElementById('m-row').value);
+    const col = parseInt(document.getElementById('m-col').value);
+    const serial = document.getElementById('m-serial').value.trim();
+    if (isNaN(row) || isNaN(col) || !serial) { log('Fill in row, col, serial'); return; }
+    try {
+      const res = await api('POST', '/mines', { row, col, serial });
+      log('Mine created ID=' + res.id);
+      await syncAll();
+    } catch(e) { log('Error: ' + e.message); }
+  }
+
+  async function deleteMine(id) {
+    try {
+      await fetch(url() + '/mines/' + id, { method: 'DELETE' });
+      log('Mine ' + id + ' deleted');
+      await syncAll();
+    } catch(e) { log('Error: ' + e.message); }
+  }
+
+  async function createRover() {
+    const commands = document.getElementById('r-cmds').value.trim().toUpperCase();
+    if (!commands) { log('Enter commands'); return; }
+    try {
+      const res = await api('POST', '/rovers', { commands });
+      log('Rover created ID=' + res.id);
+      document.getElementById('d-id').value = res.id;
+      await syncAll();
+    } catch(e) { log('Error: ' + e.message); }
+  }
+
+  async function deleteRover(id) {
+    try {
+      await fetch(url() + '/rovers/' + id, { method: 'DELETE' });
+      log('Rover ' + id + ' deleted');
+      await syncAll();
+    } catch(e) { log('Error: ' + e.message); }
+  }
+
+  async function quickDispatch(id) {
+    document.getElementById('d-id').value = id;
+    await dispatch();
+  }
+
+  async function dispatch() {
+    const id = parseInt(document.getElementById('d-id').value);
+    if (isNaN(id)) { log('Enter rover ID'); return; }
+    try {
+      const res = await api('POST', '/rovers/' + id + '/dispatch');
+      log('Rover ' + id + ' -> ' + res.status + ' at (' + res.position.row + ',' + res.position.col + ')');
+      if (res.disarmed_mines && res.disarmed_mines.length) {
+        res.disarmed_mines.forEach(m => log('  Disarmed (' + m.row + ',' + m.col + ') PIN=' + m.pin));
+      }
+      if (res.path) {
+        pathOverlay = res.path.map(row => row.split(' ').map(c => c === '*' ? 1 : 0));
+        const pathEl = document.getElementById('path-out');
+        pathEl.textContent = res.path.join('\n');
+        pathEl.style.display = 'block';
+      }
+      await syncAll();
+    } catch(e) { log('Error: ' + e.message); }
+  }
+</script>
+</body>
+</html>
